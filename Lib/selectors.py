@@ -16,6 +16,7 @@ import sys
 # generic events, that must be mapped to implementation-specific ones
 EVENT_READ = (1 << 0)
 EVENT_WRITE = (1 << 1)
+HAS_EPOLLEXCLUSIVE = getattr(select, 'EPOLLEXCLUSIVE')
 
 
 def _fileobj_to_fd(fileobj):
@@ -484,6 +485,34 @@ if hasattr(select, 'epoll'):
             self._selector.close()
             super().close()
 
+    if HAS_EPOLLEXCLUSIVE:
+
+        class EpollExclusiveSelector(EpollSelector):
+            def register(self, fileobj, events, data=None):
+                # Use _BaseSelectorImpl's register() to get key
+                key = super(_PollLikeSelector, self).register(
+                    fileobj, events, data
+                )
+                poller_events = select.EPOLLEXCLUSIVE
+                if events & EVENT_READ:
+                    poller_events |= self._EVENT_READ
+                if events & EVENT_WRITE:
+                    poller_events |= self._EVENT_WRITE
+                try:
+                    self._selector.register(key.fd, poller_events)
+                except:
+                    super().unregister(fileobj)
+                    raise
+                return key
+
+            def modify(self, fileobj, events, data=None):
+                # Use _BaseSelectorImpl's modify() as it does
+                # a register/unregister dance. EPOLLEXCLUSIVE
+                # does not support EPOLL_CTL_MOD.
+                return super(_PollLikeSelector, self).modify(
+                    fileobj, events, data
+                )
+
 
 if hasattr(select, 'devpoll'):
 
@@ -609,7 +638,10 @@ def _can_use(method):
 if _can_use('kqueue'):
     DefaultSelector = KqueueSelector
 elif _can_use('epoll'):
-    DefaultSelector = EpollSelector
+    if HAS_EPOLLEXCLUSIVE:
+        DefaultSelector = EpollExclusiveSelector
+    else:
+        DefaultSelector = EpollSelector
 elif _can_use('devpoll'):
     DefaultSelector = DevpollSelector
 elif _can_use('poll'):
